@@ -1,57 +1,44 @@
-import { _decorator, Component, Node, Prefab, instantiate, Vec3, tween, Label, Color, Sprite, UITransform } from 'cc';
+import { _decorator, Component, Node, Prefab, instantiate, Vec3, tween, Label, Color, Sprite, UITransform, SpriteFrame, Graphics } from 'cc';
 import { Gem } from './Gem';
+import { GravityManager } from './GravityManager';
+import { MatchValidator } from './MatchValidator';
 const { ccclass, property } = _decorator;
 
 /**
- * MATCH-3 GAME CONTROLLER WITH ROTATING BOARD
+ * MATCH-3 GAME - MAIN CONTROLLER
  * 
- * Enhanced match-3 game with gravity direction changes via board rotation.
- * Players can rotate the entire board 90 degrees to change where gems fall.
- * 
- * NEW FEATURES:
- * - Rotating board mechanic (Left/Right rotation buttons)
- * - Dynamic gravity based on rotation angle
- * - Visual grid board background
- * - Limited rotations per level for strategy
- * 
- * ROTATION ANGLES:
- * 0° = Down gravity (normal)
- * 90° = Left gravity
- * 180° = Up gravity
- * 270° = Right gravity
+ * Coordinates all game systems: input, grid management, scoring, rotation
+ * Uses utility classes for specific responsibilities:
+ * - GravityManager: Handles gem falling logic
+ * - MatchValidator: Detects matches and validates moves
  */
 
 @ccclass('Match3Game')
 export class Match3Game extends Component {
     
-    // PROPERTIES - Visible in Cocos Creator editor
-    
     @property(Prefab)
     gemPrefab: Prefab = null;
     
     @property(Node)
-    gridContainer: Node = null; // Container that rotates
+    gridContainer: Node = null;
     
     @property(Node)
-    gridBackground: Node = null; // Visual grid (doesn't rotate)
+    gridBackground: Node = null;
     
     @property(Label)
     scoreLabel: Label = null;
     
     @property(Label)
-    rotationsLabel: Label = null; // Shows remaining rotations
+    rotationsLabel: Label = null;
     
     @property(Node)
-    rotateLeftBtn: Node = null; // Button to rotate left
+    rotateLeftBtn: Node = null;
     
     @property(Node)
-    rotateRightBtn: Node = null; // Button to rotate right
+    rotateRightBtn: Node = null;
     
-    @property
-    rows: number = 8;
-    
-    @property
-    cols: number = 8;
+    @property([SpriteFrame])
+    gemSpriteFrames: SpriteFrame[] = [];
     
     @property
     gemSize: number = 60;
@@ -60,62 +47,152 @@ export class Match3Game extends Component {
     gemTypes: number = 5;
     
     @property
-    maxRotations: number = 10; // Limited rotations per game
+    maxRotations: number = 10;
     
-    // PRIVATE VARIABLES
+    @property
+    enableAutoShuffle: boolean = true;
+    
+    // @property({ multiline: true })
+    boardPatternString: string =
+    "0,0,0,1,1,1,1,0,0,0\n" +
+    "0,0,1,1,1,1,1,1,0,0\n" +
+    "0,1,1,1,1,1,1,1,1,0\n" +
+    "1,1,1,1,1,1,1,1,1,1\n" +
+    "1,1,1,1,0,0,1,1,1,1\n" +
+    "1,1,1,1,0,0,1,1,1,1\n" +
+    "1,1,1,1,1,1,1,1,1,1\n" +
+    "0,1,1,1,1,1,1,1,1,0\n" +
+    "0,0,1,1,1,1,1,1,0,0\n" +
+    "0,0,0,1,1,1,1,0,0,0";
     
     private grid: Node[][] = [];
     private selectedGem: Node = null;
     private score: number = 0;
     private isProcessing: boolean = false;
-    private rotationAngle: number = 0; // Current board rotation (0, 90, 180, 270)
+    private rotationAngle: number = 0;
     private remainingRotations: number = 0;
+    private playablePattern: number[][] = [];
+    private rows: number = 0;
+    private cols: number = 0;
     
-    /**
-     * GEM COLORS - 5 distinct colors for visual clarity
-     */
+    private gravityManager: GravityManager = null;
+    private matchValidator: MatchValidator = null;
+    
     private readonly GEM_COLORS = [
-        new Color(255, 80, 80),     // 0 = Red
-        new Color(80, 255, 80),     // 1 = Green
-        new Color(80, 80, 255),     // 2 = Blue
-        new Color(255, 255, 80),    // 3 = Yellow
-        new Color(255, 80, 255)     // 4 = Purple
+        new Color(255, 80, 80),
+        new Color(80, 255, 80),
+        new Color(80, 80, 255),
+        new Color(255, 255, 80),
+        new Color(255, 80, 255)
     ];
     
-    /**
-     * START - Initialize the game
-     */
     start() {
+        console.log('Match3Game starting...');
+        
         this.remainingRotations = this.maxRotations;
+        this.playablePattern = this.parsePatternString();
+        
+        this.rows = this.playablePattern.length;
+        this.cols = this.playablePattern.length > 0 ? this.playablePattern[0].length : 0;
+        
+        console.log(`Grid size: ${this.rows} rows x ${this.cols} cols`);
+        
+        if (this.rows === 0 || this.cols === 0) {
+            console.error('Invalid grid size!');
+            return;
+        }
+        
+        // Initialize utility classes
+        this.gravityManager = new GravityManager(
+            this.grid, 
+            this.playablePattern, 
+            this.rows, 
+            this.cols,
+            (gem, row, col) => this.animateGemToGridPosition(gem, row, col)
+        );
+        
+        this.matchValidator = new MatchValidator(
+            this.grid,
+            this.playablePattern,
+            this.rows,
+            this.cols
+        );
+        
         this.createGridBackground();
         this.initializeGrid();
         this.updateScore();
         this.updateRotationsDisplay();
         this.setupRotationButtons();
+        
+        console.log('Match3Game initialization complete');
+    }
+    
+    private parsePatternString(): number[][] {
+        const pattern: number[][] = [];
+        
+        if (!this.boardPatternString || this.boardPatternString.trim() === '') {
+            for (let i = 0; i < 8; i++) {
+                pattern[i] = [];
+                for (let j = 0; j < 8; j++) {
+                    pattern[i][j] = 1;
+                }
+            }
+            return pattern;
+        }
+        
+        const rows = this.boardPatternString.trim().split('\n');
+        
+        for (let i = 0; i < rows.length; i++) {
+            const cols = rows[i].trim().split(/[,\s]+/).map(val => {
+                const parsed = parseInt(val.trim());
+                return (isNaN(parsed) || parsed === 0) ? 0 : 1;
+            });
+            pattern[i] = cols;
+        }
+        
+        const maxCols = Math.max(...pattern.map(row => row.length));
+        for (let i = 0; i < pattern.length; i++) {
+            while (pattern[i].length < maxCols) {
+                pattern[i].push(1);
+            }
+        }
+        
+        return pattern;
     }
     
     /**
      * CREATE GRID BACKGROUND
-     * Creates a visual grid with lines to show the playing field
+     * Uses Graphics to draw solid colored rectangles
      */
     private createGridBackground() {
-        if (!this.gridBackground) return;
+        if (!this.gridBackground) {
+            console.error('Grid Background node not assigned!');
+            return;
+        }
         
-        // Create a simple colored background for each cell
+        this.gridBackground.removeAllChildren();
+        
         for (let row = 0; row < this.rows; row++) {
             for (let col = 0; col < this.cols; col++) {
-                const cell = new Node('GridCell');
-                const sprite = cell.addComponent(Sprite);
+                const cell = new Node(`GridCell_${row}_${col}`);
                 
-                // Checkerboard pattern
-                const isDark = (row + col) % 2 === 0;
-                sprite.color = isDark ? new Color(40, 40, 40) : new Color(60, 60, 60);
-                
-                // Set size
                 const transform = cell.addComponent(UITransform);
                 transform.setContentSize(this.gemSize - 2, this.gemSize - 2);
                 
-                // Position in grid
+                // Use Graphics to draw solid color
+                const graphics = cell.addComponent(Graphics);
+                const isPlayable = this.playablePattern[row][col] === 1;
+                
+                if (isPlayable) {
+                    graphics.fillColor = new Color(200, 200, 200, 255);
+                } else {
+                    graphics.fillColor = new Color(40, 40, 40, 255);
+                }
+                
+                const halfSize = (this.gemSize - 2) / 2;
+                graphics.rect(-halfSize, -halfSize, this.gemSize - 2, this.gemSize - 2);
+                graphics.fill();
+                
                 const x = (col - this.cols / 2) * this.gemSize + this.gemSize / 2;
                 const y = (row - this.rows / 2) * this.gemSize + this.gemSize / 2;
                 cell.setPosition(x, y, 0);
@@ -123,321 +200,70 @@ export class Match3Game extends Component {
                 this.gridBackground.addChild(cell);
             }
         }
+        
+        console.log(`Grid background created with ${this.gridBackground.children.length} cells`);
     }
     
-    /**
-     * SETUP ROTATION BUTTONS
-     * Add click handlers to rotation buttons
-     */
     private setupRotationButtons() {
         if (this.rotateLeftBtn) {
             this.rotateLeftBtn.on(Node.EventType.TOUCH_END, () => this.rotateBoard(-90), this);
         }
-        
         if (this.rotateRightBtn) {
             this.rotateRightBtn.on(Node.EventType.TOUCH_END, () => this.rotateBoard(90), this);
         }
     }
     
-    /**
-     * ROTATE BOARD
-     * Rotates the entire board by 90 degrees and changes gravity direction
-     * 
-     * @param degrees - Rotation amount (+90 for right, -90 for left)
-     */
-    private async rotateBoard(degrees: number) {
-        // Check if we can rotate
-        if (this.isProcessing || this.remainingRotations <= 0) return;
-        
-        this.isProcessing = true;
-        this.remainingRotations--;
-        this.updateRotationsDisplay();
-        
-        // Update rotation angle (keep between 0-359)
-        this.rotationAngle = (this.rotationAngle + degrees + 360) % 360;
-        
-        // Animate the rotation
-        await this.animateRotation(degrees);
-        
-        // Apply gravity in the new direction
-        await this.applyGravity();
-        
-        // Check for matches after gravity settles
-        const matches = this.findAllMatches();
-        if (matches.length > 0) {
-            await this.processMatches(matches);
-        }
-        
-        this.isProcessing = false;
-    }
-    
-    /**
-     * ANIMATE ROTATION
-     * Smoothly rotates the grid container visually
-     */
-    private animateRotation(degrees: number): Promise<void> {
-        return new Promise((resolve) => {
-            const currentRotation = this.gridContainer.eulerAngles.clone();
-            const targetRotation = currentRotation.clone();
-            targetRotation.z += degrees;
-            
-            tween(this.gridContainer)
-                .to(0.5, { eulerAngles: targetRotation })
-                .call(() => resolve())
-                .start();
-        });
-    }
-    
-    /**
-     * APPLY GRAVITY
-     * Makes gems fall in the direction determined by current rotation
-     * 
-     * GRAVITY DIRECTIONS:
-     * 0° = Down (normal)
-     * 90° = Left
-     * 180° = Up
-     * 270° = Right
-     */
-    private async applyGravity(): Promise<void> {
-        let moved = false;
-        
-        // Determine gravity direction based on rotation
-        switch (this.rotationAngle) {
-            case 0:   // Down gravity
-                moved = await this.applyDownGravity();
-                break;
-            case 90:  // Left gravity
-                moved = await this.applyLeftGravity();
-                break;
-            case 180: // Up gravity
-                moved = await this.applyUpGravity();
-                break;
-            case 270: // Right gravity
-                moved = await this.applyRightGravity();
-                break;
-        }
-        
-        // If gems moved, fill empty spaces and check again
-        if (moved) {
-            await this.fillEmptySpaces();
-            // Recursively apply gravity until no more movement
-            await this.applyGravity();
-        }
-    }
-    
-    /**
-     * APPLY DOWN GRAVITY (Normal - 0°)
-     * Gems fall downward (decreasing row index)
-     */
-    private async applyDownGravity(): Promise<boolean> {
-        let moved = false;
-        const promises = [];
-        
-        for (let col = 0; col < this.cols; col++) {
-            for (let row = 1; row < this.rows; row++) {
-                if (!this.grid[row][col]) continue;
-                
-                // Find lowest empty space below
-                let targetRow = row - 1;
-                while (targetRow >= 0 && !this.grid[targetRow][col]) {
-                    targetRow--;
-                }
-                targetRow++;
-                
-                if (targetRow !== row) {
-                    // Move gem down
-                    const gem = this.grid[row][col];
-                    const gemComp = gem.getComponent(Gem);
-                    
-                    this.grid[row][col] = null;
-                    this.grid[targetRow][col] = gem;
-                    gemComp.row = targetRow;
-                    
-                    promises.push(this.animateGemToGridPosition(gem, targetRow, col));
-                    moved = true;
-                }
-            }
-        }
-        
-        await Promise.all(promises);
-        return moved;
-    }
-    
-    /**
-     * APPLY LEFT GRAVITY (90°)
-     * Gems fall to the left (decreasing col index)
-     */
-    private async applyLeftGravity(): Promise<boolean> {
-        let moved = false;
-        const promises = [];
-        
-        for (let row = 0; row < this.rows; row++) {
-            for (let col = 1; col < this.cols; col++) {
-                if (!this.grid[row][col]) continue;
-                
-                // Find leftmost empty space
-                let targetCol = col - 1;
-                while (targetCol >= 0 && !this.grid[row][targetCol]) {
-                    targetCol--;
-                }
-                targetCol++;
-                
-                if (targetCol !== col) {
-                    const gem = this.grid[row][col];
-                    const gemComp = gem.getComponent(Gem);
-                    
-                    this.grid[row][col] = null;
-                    this.grid[row][targetCol] = gem;
-                    gemComp.col = targetCol;
-                    
-                    promises.push(this.animateGemToGridPosition(gem, row, targetCol));
-                    moved = true;
-                }
-            }
-        }
-        
-        await Promise.all(promises);
-        return moved;
-    }
-    
-    /**
-     * APPLY UP GRAVITY (180°)
-     * Gems fall upward (increasing row index)
-     */
-    private async applyUpGravity(): Promise<boolean> {
-        let moved = false;
-        const promises = [];
-        
-        for (let col = 0; col < this.cols; col++) {
-            for (let row = this.rows - 2; row >= 0; row--) {
-                if (!this.grid[row][col]) continue;
-                
-                // Find highest empty space above
-                let targetRow = row + 1;
-                while (targetRow < this.rows && !this.grid[targetRow][col]) {
-                    targetRow++;
-                }
-                targetRow--;
-                
-                if (targetRow !== row) {
-                    const gem = this.grid[row][col];
-                    const gemComp = gem.getComponent(Gem);
-                    
-                    this.grid[row][col] = null;
-                    this.grid[targetRow][col] = gem;
-                    gemComp.row = targetRow;
-                    
-                    promises.push(this.animateGemToGridPosition(gem, targetRow, col));
-                    moved = true;
-                }
-            }
-        }
-        
-        await Promise.all(promises);
-        return moved;
-    }
-    
-    /**
-     * APPLY RIGHT GRAVITY (270°)
-     * Gems fall to the right (increasing col index)
-     */
-    private async applyRightGravity(): Promise<boolean> {
-        let moved = false;
-        const promises = [];
-        
-        for (let row = 0; row < this.rows; row++) {
-            for (let col = this.cols - 2; col >= 0; col--) {
-                if (!this.grid[row][col]) continue;
-                
-                // Find rightmost empty space
-                let targetCol = col + 1;
-                while (targetCol < this.cols && !this.grid[row][targetCol]) {
-                    targetCol++;
-                }
-                targetCol--;
-                
-                if (targetCol !== col) {
-                    const gem = this.grid[row][col];
-                    const gemComp = gem.getComponent(Gem);
-                    
-                    this.grid[row][col] = null;
-                    this.grid[row][targetCol] = gem;
-                    gemComp.col = targetCol;
-                    
-                    promises.push(this.animateGemToGridPosition(gem, row, targetCol));
-                    moved = true;
-                }
-            }
-        }
-        
-        await Promise.all(promises);
-        return moved;
-    }
-    
-    /**
-     * ANIMATE GEM TO GRID POSITION
-     * Smoothly moves a gem to its grid coordinates
-     */
-    private animateGemToGridPosition(gem: Node, row: number, col: number): Promise<void> {
-        return new Promise((resolve) => {
-            const x = (col - this.cols / 2) * this.gemSize + this.gemSize / 2;
-            const y = (row - this.rows / 2) * this.gemSize + this.gemSize / 2;
-            
-            tween(gem)
-                .to(0.3, { position: new Vec3(x, y, 0) })
-                .call(() => resolve())
-                .start();
-        });
-    }
-    
-    /**
-     * INITIALIZE GRID
-     * Creates the initial board with no matches
-     */
     private initializeGrid() {
+        let attempts = 0;
+        const maxAttempts = 100;
+        
+        while (attempts < maxAttempts) {
+            attempts++;
+            
+            for (let row = 0; row < this.rows; row++) {
+                this.grid[row] = [];
+                for (let col = 0; col < this.cols; col++) {
+                    if (this.playablePattern[row][col] === 0) {
+                        this.grid[row][col] = null;
+                        continue;
+                    }
+                    
+                    let gemType: number;
+                    let safetyCounter = 0;
+                    do {
+                        gemType = this.getRandomGemType();
+                        safetyCounter++;
+                        if (safetyCounter > 50) {
+                            gemType = (gemType + 1) % this.gemTypes;
+                            break;
+                        }
+                    } while (this.matchValidator.wouldCreateMatch(row, col, gemType));
+                    
+                    this.createGem(row, col, gemType);
+                }
+            }
+            
+            if (this.matchValidator.hasValidMoves()) {
+                console.log(`✅ Valid board generated after ${attempts} attempts`);
+                return;
+            } else {
+                console.log(`❌ No valid moves, regenerating...`);
+                this.clearGrid();
+            }
+        }
+    }
+    
+    private clearGrid() {
         for (let row = 0; row < this.rows; row++) {
-            this.grid[row] = [];
             for (let col = 0; col < this.cols; col++) {
-                let gemType: number;
-                do {
-                    gemType = this.getRandomGemType();
-                } while (this.wouldCreateMatch(row, col, gemType));
-                
-                this.createGem(row, col, gemType);
+                if (this.grid[row][col]) {
+                    this.grid[row][col].destroy();
+                    this.grid[row][col] = null;
+                }
             }
         }
     }
     
-    /**
-     * WOULD CREATE MATCH
-     * Checks if placing a gem would create a match of 3+
-     */
-    private wouldCreateMatch(row: number, col: number, gemType: number): boolean {
-        // Check horizontal
-        if (col >= 2) {
-            const left1Type = this.grid[row][col - 1]?.getComponent(Gem)?.type;
-            const left2Type = this.grid[row][col - 2]?.getComponent(Gem)?.type;
-            if (left1Type === gemType && left2Type === gemType) {
-                return true;
-            }
-        }
-        
-        // Check vertical
-        if (row >= 2) {
-            const up1Type = this.grid[row - 1][col]?.getComponent(Gem)?.type;
-            const up2Type = this.grid[row - 2][col]?.getComponent(Gem)?.type;
-            if (up1Type === gemType && up2Type === gemType) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-    
-    /**
-     * CREATE GEM
-     * Instantiates a new gem at the specified grid position
-     */
     private createGem(row: number, col: number, gemType: number) {
         const gem = instantiate(this.gemPrefab);
         
@@ -446,14 +272,24 @@ export class Match3Game extends Component {
         gemComponent.row = row;
         gemComponent.col = col;
         
+        // Always use sprite frames, no color tint
         const sprite = gem.getComponent(Sprite);
         if (sprite) {
-            sprite.color = this.GEM_COLORS[gemType];
+            if (this.gemSpriteFrames && this.gemSpriteFrames.length > gemType && this.gemSpriteFrames[gemType]) {
+                sprite.spriteFrame = this.gemSpriteFrames[gemType];
+                sprite.color = Color.WHITE; // Pure sprite, no tint
+            } else {
+                // Fallback to solid color if no sprite
+                sprite.color = this.GEM_COLORS[gemType];
+            }
         }
         
         const x = (col - this.cols / 2) * this.gemSize + this.gemSize / 2;
         const y = (row - this.rows / 2) * this.gemSize + this.gemSize / 2;
         gem.setPosition(x, y, 0);
+        
+        // Counter-rotate gem to keep it upright relative to world
+        gem.eulerAngles = new Vec3(0, 0, -this.gridContainer.eulerAngles.z);
         
         gem.on(Node.EventType.TOUCH_END, this.onGemClicked, this);
         
@@ -461,10 +297,6 @@ export class Match3Game extends Component {
         this.grid[row][col] = gem;
     }
     
-    /**
-     * ON GEM CLICKED
-     * Handles gem selection and swapping
-     */
     private onGemClicked(event: any) {
         if (this.isProcessing) return;
         
@@ -496,20 +328,12 @@ export class Match3Game extends Component {
         }
     }
     
-    /**
-     * ARE ADJACENT
-     * Checks if two grid positions are next to each other
-     */
     private areAdjacent(row1: number, col1: number, row2: number, col2: number): boolean {
         const rowDiff = Math.abs(row1 - row2);
         const colDiff = Math.abs(col1 - col2);
         return (rowDiff === 1 && colDiff === 0) || (rowDiff === 0 && colDiff === 1);
     }
     
-    /**
-     * SWAP GEMS
-     * Swaps two gems and checks for matches
-     */
     private async swapGems(gem1: Node, gem2: Node) {
         this.isProcessing = true;
         
@@ -529,12 +353,12 @@ export class Match3Game extends Component {
         
         await this.animateSwap(gem1, gem2);
         
-        const matches = this.findAllMatches();
+        const matches = this.matchValidator.findAllMatches();
         
         if (matches.length > 0) {
             await this.processMatches(matches);
+            await this.checkAndShuffleIfNoMoves();
         } else {
-            // Invalid move - swap back
             const tempRow2 = comp1.row;
             const tempCol2 = comp1.col;
             
@@ -552,10 +376,6 @@ export class Match3Game extends Component {
         this.isProcessing = false;
     }
     
-    /**
-     * ANIMATE SWAP
-     * Smoothly swaps positions of two gems
-     */
     private animateSwap(gem1: Node, gem2: Node): Promise<void> {
         return new Promise((resolve) => {
             const pos1 = gem1.position.clone();
@@ -572,68 +392,88 @@ export class Match3Game extends Component {
         });
     }
     
-    /**
-     * FIND ALL MATCHES
-     * Scans grid for all matches of 3 or more
-     */
-    private findAllMatches(): Node[] {
-        const matches = new Set<Node>();
+    private async rotateBoard(degrees: number) {
+        if (this.isProcessing || this.remainingRotations <= 0) return;
         
-        // Horizontal matches
-        for (let row = 0; row < this.rows; row++) {
-            for (let col = 0; col < this.cols - 2; col++) {
-                if (!this.grid[row][col]) continue;
-                
-                const type = this.grid[row][col].getComponent(Gem).type;
-                let matchLength = 1;
-                
-                for (let i = col + 1; i < this.cols; i++) {
-                    if (this.grid[row][i] && this.grid[row][i].getComponent(Gem).type === type) {
-                        matchLength++;
-                    } else {
-                        break;
-                    }
-                }
-                
-                if (matchLength >= 3) {
-                    for (let i = col; i < col + matchLength; i++) {
-                        matches.add(this.grid[row][i]);
-                    }
-                }
-            }
+        this.isProcessing = true;
+        this.remainingRotations--;
+        this.updateRotationsDisplay();
+        
+        this.rotationAngle = (this.rotationAngle + degrees + 360) % 360;
+        
+        // Rotate container AND all gems
+        await this.animateRotation(degrees);
+        await this.applyGravity();
+        
+        const matches = this.matchValidator.findAllMatches();
+        if (matches.length > 0) {
+            await this.processMatches(matches);
         }
         
-        // Vertical matches
-        for (let col = 0; col < this.cols; col++) {
-            for (let row = 0; row < this.rows - 2; row++) {
-                if (!this.grid[row][col]) continue;
-                
-                const type = this.grid[row][col].getComponent(Gem).type;
-                let matchLength = 1;
-                
-                for (let i = row + 1; i < this.rows; i++) {
-                    if (this.grid[i][col] && this.grid[i][col].getComponent(Gem).type === type) {
-                        matchLength++;
-                    } else {
-                        break;
-                    }
-                }
-                
-                if (matchLength >= 3) {
-                    for (let i = row; i < row + matchLength; i++) {
-                        matches.add(this.grid[i][col]);
-                    }
-                }
-            }
-        }
+        await this.checkAndShuffleIfNoMoves();
         
-        return Array.from(matches);
+        this.isProcessing = false;
+    }
+    
+    private animateRotation(degrees: number): Promise<void> {
+        return new Promise((resolve) => {
+            const currentRotation = this.gridContainer.eulerAngles.clone();
+            const targetRotation = currentRotation.clone();
+            targetRotation.z += degrees;
+            
+            // Rotate container
+            tween(this.gridContainer)
+                .to(0.5, { eulerAngles: targetRotation })
+                .call(() => {
+                    // Counter-rotate all gems to keep them upright
+                    for (let row = 0; row < this.rows; row++) {
+                        for (let col = 0; col < this.cols; col++) {
+                            if (this.grid[row][col]) {
+                                this.grid[row][col].eulerAngles = new Vec3(0, 0, -targetRotation.z);
+                            }
+                        }
+                    }
+                    resolve();
+                })
+                .start();
+        });
     }
     
     /**
-     * PROCESS MATCHES
-     * Removes matched gems and triggers chain reactions
+     * APPLY GRAVITY
+     * Single pass compact, then fill once
+     * NO multiple passes - gems spawn in correct positions
      */
+    private async applyGravity(): Promise<void> {
+        console.log(`Starting gravity (angle: ${this.rotationAngle}°)`);
+        
+        // Step 1: Compact existing gems ONE TIME
+        let moved = false;
+        switch (this.rotationAngle) {
+            case 0:
+                moved = await this.gravityManager.applyDown();
+                break;
+            case 90:
+                moved = await this.gravityManager.applyLeft();
+                break;
+            case 180:
+                moved = await this.gravityManager.applyUp();
+                break;
+            case 270:
+                moved = await this.gravityManager.applyRight();
+                break;
+        }
+        
+        console.log(`Compact complete: moved = ${moved}`);
+        
+        // Step 2: Fill empty spaces
+        // New gems are created already in their final positions
+        console.log(`Filling empty spaces...`);
+        await this.fillEmptySpaces();
+        
+        console.log(`Gravity complete`);
+    }
+    
     private async processMatches(matches: Node[]) {
         this.score += matches.length * 10;
         this.updateScore();
@@ -641,16 +481,12 @@ export class Match3Game extends Component {
         await this.removeGems(matches);
         await this.applyGravity();
         
-        const newMatches = this.findAllMatches();
+        const newMatches = this.matchValidator.findAllMatches();
         if (newMatches.length > 0) {
             await this.processMatches(newMatches);
         }
     }
     
-    /**
-     * REMOVE GEMS
-     * Destroys matched gems with animation
-     */
     private removeGems(gems: Node[]): Promise<void> {
         return new Promise((resolve) => {
             let completed = 0;
@@ -671,25 +507,20 @@ export class Match3Game extends Component {
         });
     }
     
-    /**
-     * FILL EMPTY SPACES
-     * Creates new gems based on current gravity direction
-     */
     private async fillEmptySpaces(): Promise<void> {
         const promises = [];
         
-        // Fill based on rotation angle
         switch (this.rotationAngle) {
-            case 0:   // Down - spawn at top
+            case 0:
                 promises.push(...this.fillFromTop());
                 break;
-            case 90:  // Left - spawn at right
+            case 90:
                 promises.push(...this.fillFromRight());
                 break;
-            case 180: // Up - spawn at bottom
+            case 180:
                 promises.push(...this.fillFromBottom());
                 break;
-            case 270: // Right - spawn at left
+            case 270:
                 promises.push(...this.fillFromLeft());
                 break;
         }
@@ -697,130 +528,216 @@ export class Match3Game extends Component {
         await Promise.all(promises);
     }
     
-    /**
-     * FILL FROM TOP (Down gravity)
-     */
     private fillFromTop(): Promise<void>[] {
         const promises = [];
         
         for (let col = 0; col < this.cols; col++) {
-            for (let row = this.rows - 1; row >= 0; row--) {
-                if (!this.grid[row][col]) {
-                    const gemType = this.getRandomGemType();
-                    this.createGem(row, col, gemType);
-                    
-                    const gem = this.grid[row][col];
-                    const startY = (this.rows / 2 + 2) * this.gemSize;
-                    gem.setPosition(gem.position.x, startY, 0);
-                    
-                    promises.push(this.animateGemToGridPosition(gem, row, col));
+            // Find all empty playable cells in this column
+            const emptyCells: number[] = [];
+            for (let row = 0; row < this.rows; row++) {
+                if (this.isPlayableCell(row, col) && !this.grid[row][col]) {
+                    emptyCells.push(row);
                 }
+            }
+            
+            // Create gems for each empty cell
+            for (const row of emptyCells) {
+                const gemType = this.getRandomGemType();
+                this.createGem(row, col, gemType);
+                
+                const gem = this.grid[row][col];
+                const targetY = (row - this.rows / 2) * this.gemSize + this.gemSize / 2;
+                const startY = (this.rows / 2 + 3) * this.gemSize;
+                gem.setPosition(gem.position.x, startY, 0);
+                
+                promises.push(this.animateGemToGridPosition(gem, row, col));
             }
         }
         
         return promises;
     }
     
-    /**
-     * FILL FROM RIGHT (Left gravity)
-     */
     private fillFromRight(): Promise<void>[] {
         const promises = [];
         
         for (let row = 0; row < this.rows; row++) {
-            for (let col = this.cols - 1; col >= 0; col--) {
-                if (!this.grid[row][col]) {
-                    const gemType = this.getRandomGemType();
-                    this.createGem(row, col, gemType);
-                    
-                    const gem = this.grid[row][col];
-                    const startX = (this.cols / 2 + 2) * this.gemSize;
-                    gem.setPosition(startX, gem.position.y, 0);
-                    
-                    promises.push(this.animateGemToGridPosition(gem, row, col));
+            const emptyCells: number[] = [];
+            for (let col = 0; col < this.cols; col++) {
+                if (this.isPlayableCell(row, col) && !this.grid[row][col]) {
+                    emptyCells.push(col);
                 }
+            }
+            
+            for (const col of emptyCells) {
+                const gemType = this.getRandomGemType();
+                this.createGem(row, col, gemType);
+                
+                const gem = this.grid[row][col];
+                const targetX = (col - this.cols / 2) * this.gemSize + this.gemSize / 2;
+                const startX = (this.cols / 2 + 3) * this.gemSize;
+                gem.setPosition(startX, gem.position.y, 0);
+                
+                promises.push(this.animateGemToGridPosition(gem, row, col));
             }
         }
         
         return promises;
     }
     
-    /**
-     * FILL FROM BOTTOM (Up gravity)
-     */
     private fillFromBottom(): Promise<void>[] {
         const promises = [];
         
         for (let col = 0; col < this.cols; col++) {
+            const emptyCells: number[] = [];
             for (let row = 0; row < this.rows; row++) {
-                if (!this.grid[row][col]) {
-                    const gemType = this.getRandomGemType();
-                    this.createGem(row, col, gemType);
-                    
-                    const gem = this.grid[row][col];
-                    const startY = -(this.rows / 2 + 2) * this.gemSize;
-                    gem.setPosition(gem.position.x, startY, 0);
-                    
-                    promises.push(this.animateGemToGridPosition(gem, row, col));
+                if (this.isPlayableCell(row, col) && !this.grid[row][col]) {
+                    emptyCells.push(row);
                 }
+            }
+            
+            for (const row of emptyCells) {
+                const gemType = this.getRandomGemType();
+                this.createGem(row, col, gemType);
+                
+                const gem = this.grid[row][col];
+                const targetY = (row - this.rows / 2) * this.gemSize + this.gemSize / 2;
+                const startY = -(this.rows / 2 + 3) * this.gemSize;
+                gem.setPosition(gem.position.x, startY, 0);
+                
+                promises.push(this.animateGemToGridPosition(gem, row, col));
             }
         }
         
         return promises;
     }
     
-    /**
-     * FILL FROM LEFT (Right gravity)
-     */
     private fillFromLeft(): Promise<void>[] {
         const promises = [];
         
         for (let row = 0; row < this.rows; row++) {
+            const emptyCells: number[] = [];
             for (let col = 0; col < this.cols; col++) {
-                if (!this.grid[row][col]) {
-                    const gemType = this.getRandomGemType();
-                    this.createGem(row, col, gemType);
-                    
-                    const gem = this.grid[row][col];
-                    const startX = -(this.cols / 2 + 2) * this.gemSize;
-                    gem.setPosition(startX, gem.position.y, 0);
-                    
-                    promises.push(this.animateGemToGridPosition(gem, row, col));
+                if (this.isPlayableCell(row, col) && !this.grid[row][col]) {
+                    emptyCells.push(col);
                 }
+            }
+            
+            for (const col of emptyCells) {
+                const gemType = this.getRandomGemType();
+                this.createGem(row, col, gemType);
+                
+                const gem = this.grid[row][col];
+                const targetX = (col - this.cols / 2) * this.gemSize + this.gemSize / 2;
+                const startX = -(this.cols / 2 + 3) * this.gemSize;
+                gem.setPosition(startX, gem.position.y, 0);
+                
+                promises.push(this.animateGemToGridPosition(gem, row, col));
             }
         }
         
         return promises;
     }
     
-    /**
-     * HIGHLIGHT GEM
-     * Visual feedback for selected gem
-     */
+    private isPlayableCell(row: number, col: number): boolean {
+        return this.playablePattern[row] && this.playablePattern[row][col] === 1;
+    }
+    
+    private animateGemToGridPosition(gem: Node, row: number, col: number): Promise<void> {
+        return new Promise((resolve) => {
+            const x = (col - this.cols / 2) * this.gemSize + this.gemSize / 2;
+            const y = (row - this.rows / 2) * this.gemSize + this.gemSize / 2;
+            
+            tween(gem)
+                .to(0.2, { position: new Vec3(x, y, 0) })
+                .call(() => resolve())
+                .start();
+        });
+    }
+    
+    private async checkAndShuffleIfNoMoves() {
+        if (this.enableAutoShuffle && !this.matchValidator.hasValidMoves()) {
+            console.log('⚠️ No valid moves, shuffling...');
+            await this.shuffleBoard();
+        }
+    }
+    
+    private async shuffleBoard() {
+        console.log('🔀 Shuffling board...');
+        
+        const gems: { type: number }[] = [];
+        for (let row = 0; row < this.rows; row++) {
+            for (let col = 0; col < this.cols; col++) {
+                if (this.grid[row][col] && this.playablePattern[row][col] === 1) {
+                    gems.push({ type: this.grid[row][col].getComponent(Gem).type });
+                }
+            }
+        }
+        
+        // Fisher-Yates shuffle
+        for (let i = gems.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [gems[i], gems[j]] = [gems[j], gems[i]];
+        }
+        
+        let attempts = 0;
+        while (attempts < 50) {
+            attempts++;
+            let gemIndex = 0;
+            let hasMatch = false;
+            
+            for (let row = 0; row < this.rows; row++) {
+                for (let col = 0; col < this.cols; col++) {
+                    if (this.grid[row][col]) {
+                        this.grid[row][col].destroy();
+                        this.grid[row][col] = null;
+                    }
+                }
+            }
+            
+            for (let row = 0; row < this.rows; row++) {
+                for (let col = 0; col < this.cols; col++) {
+                    if (this.playablePattern[row][col] === 0 || gemIndex >= gems.length) continue;
+                    
+                    const gemType = gems[gemIndex].type;
+                    
+                    if (this.matchValidator.wouldCreateMatch(row, col, gemType)) {
+                        hasMatch = true;
+                        break;
+                    }
+                    
+                    this.createGem(row, col, gemType);
+                    gemIndex++;
+                }
+                if (hasMatch) break;
+            }
+            
+            if (!hasMatch && this.matchValidator.hasValidMoves()) {
+                console.log(`✅ Shuffled successfully`);
+                return;
+            }
+            
+            for (let i = gems.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [gems[i], gems[j]] = [gems[j], gems[i]];
+            }
+        }
+    }
+    
     private highlightGem(gem: Node, highlight: boolean) {
         const targetScale = highlight ? 1.2 : 1;
         tween(gem).to(0.1, { scale: new Vec3(targetScale, targetScale, 1) }).start();
     }
     
-    /**
-     * GET RANDOM GEM TYPE
-     */
     private getRandomGemType(): number {
         return Math.floor(Math.random() * this.gemTypes);
     }
     
-    /**
-     * UPDATE SCORE
-     */
     private updateScore() {
         if (this.scoreLabel) {
             this.scoreLabel.string = `Score: ${this.score}`;
         }
     }
     
-    /**
-     * UPDATE ROTATIONS DISPLAY
-     */
     private updateRotationsDisplay() {
         if (this.rotationsLabel) {
             this.rotationsLabel.string = `Rotations: ${this.remainingRotations}`;

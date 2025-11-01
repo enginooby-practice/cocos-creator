@@ -6,9 +6,8 @@ export class Gem extends Component {
     
     /**
      * TYPE
-     * The type/color of this gem (0-4)
-     * Each type represents a different color:
-     * 0 = Red, 1 = Green, 2 = Blue, 3 = Yellow, 4 = Purple
+     * The type/color of this gem
+     * Each type represents a different type:
      */
     public type: number = 0;
     
